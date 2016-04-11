@@ -7,11 +7,11 @@ import (
 	"github.com/tmc/scp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	// "io/ioutil"
 	"net"
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 var wg sync.WaitGroup
@@ -23,14 +23,13 @@ func SSHAgent() ssh.AuthMethod {
 	return nil
 }
 
-func ssh_do(server *api.AgentMember, user string, cmd string) {
-	// func ssh_do(server *api.AgentMember, user string, private ssh.Signer, cmd string) {
-	//fmt.Printf("%s (%s) %d\n", server.Name, server.Addr, server.Status)
-	// An SSH client is represented with a ClientConn. Currently only
-	// the "password" authentication method is supported.
-	//
-	// To authenticate with the remote server you must pass at least one
-	// implementation of AuthMethod via the Auth field in ClientConfig.
+func ssh_do(server *api.AgentMember, user string, cmd string, timeout int) {
+	defer func() {
+		if e := recover(); e != nil {
+			fmt.Println("Whoops: ", e)
+		}
+	}()
+
 	config := &ssh.ClientConfig{
 		User: user,
 		Auth: []ssh.AuthMethod{
@@ -39,25 +38,37 @@ func ssh_do(server *api.AgentMember, user string, cmd string) {
 			SSHAgent(),
 		},
 	}
-	client, err := ssh.Dial("tcp", server.Addr+":22", config)
+
+	serverandport := server.Addr + ":22"
+	_, err := net.DialTimeout("tcp", serverandport, time.Duration(timeout)*time.Second)
 	if err != nil {
-		fmt.Printf("Failed to dial %s (%s)\n", server.Name, err)
-		return
+		panic("Failed DialTimeout: " + err.Error())
+	} else {
+		client, err := ssh.Dial("tcp", server.Addr+":22", config)
+		if err != nil {
+			panic("Failed to dial: " + err.Error() + server.Name)
+		} else {
+			session, err := client.NewSession()
+			if err != nil {
+				panic("Failed to create session: " + err.Error())
+			} else {
+				defer session.Close()
+				session.Stdout = os.Stdout
+				session.Stderr = os.Stderr
+				session.Run(cmd)
+			}
+		}
 	}
-	// Each ClientConn can support multiple interactive sessions,
-	// represented by a Session.
-	session, err := client.NewSession()
-	if err != nil {
-		fmt.Printf("Failed to create session %s (%s)\n", server.Name, err)
-	}
-	defer session.Close()
-	output, _ := session.Output(cmd)
-	fmt.Printf("%s %s", server.Name, string(output))
-	defer wg.Done()
 }
 
-func scp_do(server *api.AgentMember, user string, file string) {
+func scp_do(server *api.AgentMember, user string, file string, destfile string, timeout int) {
 	// func scp_do(server *api.AgentMember, user string, private ssh.Signer, file string) {
+	defer func() {
+		if e := recover(); e != nil {
+			fmt.Println("Whoops:", e)
+		}
+	}()
+
 	config := &ssh.ClientConfig{
 		User: user,
 		Auth: []ssh.AuthMethod{
@@ -66,29 +77,41 @@ func scp_do(server *api.AgentMember, user string, file string) {
 			SSHAgent(),
 		},
 	}
-	client, err := ssh.Dial("tcp", server.Addr+":22", config)
+
+	serverandport := server.Addr + ":22"
+	_, err := net.DialTimeout("tcp", serverandport, time.Duration(timeout)*time.Second)
 	if err != nil {
-		fmt.Printf("Failed to dial %s (%s)\n", server.Name, err)
-		return
-	}
-	// Each ClientConn can support multiple interactive sessions,
-	// represented by a Session.
-	session, err := client.NewSession()
-	if err != nil {
-		fmt.Printf("Failed to create session %s (%s)\n", server.Name, err)
-	}
-	defer session.Close()
-	//output, _ := session.Output(cmd)
-	//fmt.Printf("%s %s", server.Name, string(output))
-	f, err := os.Open(file)
-	err = scp.CopyPath(f.Name(), f.Name(), session)
-	fmt.Printf("%s\n", err)
-	/*if _, err := os.Stat(dest); os.IsNotExist(err) {
-	 fmt.Printf("no such file or directory: %s\n", dest)
+		panic("Failed DialTimeout: " + err.Error())
 	} else {
-	 fmt.Println("success")
-	}*/
-	defer wg.Done()
+		client, err := ssh.Dial("tcp", server.Addr+":22", config)
+		if err != nil {
+			panic("Failed to dial: " + server.Name + " Because the following error: " + err.Error())
+		} else {
+			session, err := client.NewSession()
+			if err != nil {
+				panic("Failed to create session: " + err.Error())
+			} else {
+				f, err := os.Open(file)
+				if err != nil {
+					panic("It looks like file does not exist" + err.Error())
+				} else {
+					defer session.Close()
+					status := scp.CopyPath(f.Name(), destfile, session)
+					if status != nil {
+						panic("Something is wrong with the source file" + status.Error())
+					} else {
+						/*if _, err := os.Stat(dest); os.IsNotExist(err) {
+						 fmt.Printf("no such file or directory: %s\n", dest)
+						} else {
+						 fmt.Println("success")
+						}*/
+						fmt.Println(server.Addr + " Is done")
+						return
+					}
+				}
+			}
+		}
+	}
 }
 
 func Listmembers(consul_client *api.Client) []*api.AgentMember {
@@ -110,8 +133,10 @@ func main() {
 	var Show = flag.Bool("show", false, "Show a list of members")
 	var Cmd = flag.String("cmd", "", "Command to run on the server")
 	var Copy = flag.String("copy", "", "File to copy on the server")
+	var destfile = flag.String("destfile", "", "Destination file to copy on the server")
 	var Include = flag.String("include", "", "Include by pattern")
 	var Exclude = flag.String("exclude", "", "Exclude by pattern")
+	var Timeout = flag.Int("timeout", 5, "Connection timeout")
 	var members []*api.AgentMember
 	flag.Parse()
 	// Initialize Consul Client
@@ -119,15 +144,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	// Grab private key for ssh authentication
-	// privateBytes, err := ioutil.ReadFile(os.Getenv("HOME") + "/.ssh/id_rsa_exec")
-	// if err != nil {
-	//   panic("Failed to load private key")
-	// }
-	// private, err := ssh.ParsePrivateKey(privateBytes)
-	// if err != nil {
-	//   panic("Failed to parse private key")
-	// }
+
 	if *Show {
 		members = Listmembers(consul_client)
 		Showmembers(members)
@@ -135,23 +152,28 @@ func main() {
 	}
 	if *Cmd != "" {
 		members = Listmembers(consul_client)
+		wg.Add(len(members))
 		for _, server := range members {
 			if (strings.Contains(server.Name, *Include) || !strings.Contains(server.Name, *Exclude)) && (server.Status == 1) {
-				wg.Add(1)
-				// go ssh_do(server, *Sshuser, private, *Cmd)
-				go ssh_do(server, *Sshuser, *Cmd)
+				go func(server *api.AgentMember) {
+					ssh_do(server, *Sshuser, *Cmd, *Timeout)
+					wg.Done()
+				}(server)
 			}
 		}
 	}
 	if *Copy != "" {
 		members = Listmembers(consul_client)
+		wg.Add(len(members))
 		for _, server := range members {
 			if (strings.Contains(server.Name, *Include) || !strings.Contains(server.Name, *Exclude)) && (server.Status == 1) {
-				wg.Add(1)
-				// go scp_do(server, *Sshuser, private, *Copy)
-				go scp_do(server, *Sshuser, *Copy)
+				go func(server *api.AgentMember) {
+					scp_do(server, *Sshuser, *Copy, *destfile, *Timeout)
+					wg.Done()
+				}(server)
 			}
 		}
 	}
 	wg.Wait()
+
 }
