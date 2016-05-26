@@ -1,29 +1,35 @@
 package main
 
 import (
-	"flag"
 	"fmt"
-	"github.com/hashicorp/consul/api"
-	"github.com/tmc/scp"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 	"net"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	flag "github.com/docker/docker/pkg/mflag"
+	"github.com/hashicorp/consul/api"
+	"github.com/tmc/scp"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
-var wg sync.WaitGroup
+var (
+	url, port, sshuser, cmd, copy, destfile, include, exclude string
+	timeout                                                   int
+	show                                                      bool
+	wg                                                        sync.WaitGroup
+)
 
-func SSHAgent() ssh.AuthMethod {
+func sSHAgent() ssh.AuthMethod {
 	if sshAgent, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
 		return ssh.PublicKeysCallback(agent.NewClient(sshAgent).Signers)
 	}
 	return nil
 }
 
-func ssh_do(server *api.AgentMember, user string, cmd string, timeout int) {
+func sshDo(server *api.AgentMember, user string, cmd string, timeout int) {
 	defer func() {
 		if e := recover(); e != nil {
 			fmt.Println("Whoops: ", e)
@@ -35,7 +41,7 @@ func ssh_do(server *api.AgentMember, user string, cmd string, timeout int) {
 		Auth: []ssh.AuthMethod{
 			// ssh.PublicKeys(private),
 			// ssh.Password("password"),
-			SSHAgent(),
+			sSHAgent(),
 		},
 	}
 
@@ -61,11 +67,11 @@ func ssh_do(server *api.AgentMember, user string, cmd string, timeout int) {
 	}
 }
 
-func scp_do(server *api.AgentMember, user string, file string, destfile string, timeout int) {
-	// func scp_do(server *api.AgentMember, user string, private ssh.Signer, file string) {
+func scpDo(server *api.AgentMember, user string, file string, destfile string, timeout int) {
+	// func scpDo(server *api.AgentMember, user string, private ssh.Signer, file string) {
 	defer func() {
 		if e := recover(); e != nil {
-			fmt.Println("Whoops:", e)
+			fmt.Println("Whoops some error happend:", e)
 		}
 	}()
 
@@ -74,7 +80,7 @@ func scp_do(server *api.AgentMember, user string, file string, destfile string, 
 		Auth: []ssh.AuthMethod{
 			// ssh.PublicKeys(private),
 			// ssh.Password("password"),
-			SSHAgent(),
+			sSHAgent(),
 		},
 	}
 
@@ -114,61 +120,62 @@ func scp_do(server *api.AgentMember, user string, file string, destfile string, 
 	}
 }
 
-func Listmembers(consul_client *api.Client) []*api.AgentMember {
-	status := consul_client.Agent()
+func listmembers(consulClient *api.Client) []*api.AgentMember {
+	status := consulClient.Agent()
 	members, _ := status.Members(false)
 	return members
 }
 
-func Showmembers(members []*api.AgentMember) {
+func showMembers(members []*api.AgentMember) {
 	for _, server := range members {
 		fmt.Println(server.Name)
 	}
 }
 
 func main() {
-	var Server = flag.String("server", "localhost", "Server to connect to")
-	var Port = flag.String("port", "8500", "Port to connect to")
-	var Sshuser = flag.String("user", "", "Username")
-	var Show = flag.Bool("show", false, "Show a list of members")
-	var Cmd = flag.String("cmd", "", "Command to run on the server")
-	var Copy = flag.String("copy", "", "File to copy on the server")
-	var destfile = flag.String("destfile", "", "Destination file to copy on the server")
-	var Include = flag.String("include", "", "Include by pattern")
-	var Exclude = flag.String("exclude", "", "Exclude by pattern")
-	var Timeout = flag.Int("timeout", 5, "Connection timeout")
-	var members []*api.AgentMember
+	flag.StringVar(&url, []string{"u", "-url"}, "localhost", "Consul member endpoint. Default: localhost")
+	flag.StringVar(&port, []string{"p", "-port"}, "8500", "Consul members endpoint port. Default: 8500")
+	flag.StringVar(&sshuser, []string{"us", "-user"}, "", "Cli user name")
+	flag.BoolVar(&show, []string{"lcm", "-show-consul-members"}, false, "List consul members")
+	flag.StringVar(&cmd, []string{"c", "-cmd"}, "", "Command to run on the server")
+	flag.StringVar(&copy, []string{"cp", "-copy"}, "", "File to copy to the server")
+	flag.StringVar(&destfile, []string{"df", "-destfile"}, "", "Destination file to copy to the server")
+	flag.StringVar(&include, []string{"in", "-include"}, "", "Include by pattern")
+	flag.StringVar(&exclude, []string{"ex", "-exclude"}, "", "Exclude by pattern")
+	flag.IntVar(&timeout, []string{"t", "-timeout"}, 5, "Connection timeout")
 	flag.Parse()
+	var members []*api.AgentMember
+
 	// Initialize Consul Client
-	consul_client, err := api.NewClient(&api.Config{Address: *Server + ":" + *Port})
+	consulClient, err := api.NewClient(&api.Config{Address: url + ":" + port})
 	if err != nil {
 		panic(err)
 	}
 
-	if *Show {
-		members = Listmembers(consul_client)
-		Showmembers(members)
+	if show {
+		members = listmembers(consulClient)
+		showMembers(members)
 		os.Exit(0)
 	}
-	if *Cmd != "" {
-		members = Listmembers(consul_client)
+	if cmd != "" {
+		members = listmembers(consulClient)
 		wg.Add(len(members))
 		for _, server := range members {
-			if (strings.Contains(server.Name, *Include) || !strings.Contains(server.Name, *Exclude)) && (server.Status == 1) {
+			if (strings.Contains(server.Name, include) || !strings.Contains(server.Name, exclude)) && (server.Status == 1) {
 				go func(server *api.AgentMember) {
-					ssh_do(server, *Sshuser, *Cmd, *Timeout)
+					sshDo(server, sshuser, cmd, timeout)
 					wg.Done()
 				}(server)
 			}
 		}
 	}
-	if *Copy != "" {
-		members = Listmembers(consul_client)
+	if copy != "" {
+		members = listmembers(consulClient)
 		wg.Add(len(members))
 		for _, server := range members {
-			if (strings.Contains(server.Name, *Include) || !strings.Contains(server.Name, *Exclude)) && (server.Status == 1) {
+			if (strings.Contains(server.Name, include) || !strings.Contains(server.Name, exclude)) && (server.Status == 1) {
 				go func(server *api.AgentMember) {
-					scp_do(server, *Sshuser, *Copy, *destfile, *Timeout)
+					scpDo(server, sshuser, copy, destfile, timeout)
 					wg.Done()
 				}(server)
 			}
