@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	flag "github.com/docker/docker/pkg/mflag"
+	flag "github.com/cocooma/mflag"
 	"github.com/hashicorp/consul/api"
 	"github.com/tmc/scp"
 	"golang.org/x/crypto/ssh"
